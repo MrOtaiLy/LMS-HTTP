@@ -1,59 +1,91 @@
 import sys
 import math
-import argparse
 import requests
-from geocode import geocode
-from map_params import get_spn
 
-API_KEY = "KEY" #У меня не работает ни один ключ почему-то, поэтому заглушка
+API_KEY = "af8378fd-9ded-4076-99e2-636abd678ba7"
 
 
 def haversine(lon1, lat1, lon2, lat2):
     R = 6371000
     phi1 = math.radians(lat1)
     phi2 = math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
     dlambda = math.radians(lon2 - lon1)
-    return (
-        math.acos(
-            math.sin(phi1) * math.sin(phi2)
-            + math.cos(phi1) * math.cos(phi2) * math.cos(dlambda)
-        )
-        * R
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * (
+        math.sin(dlambda / 2) ** 2
     )
+    return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
-def get_point_color(hours):
-    if not hours:
-        return "gr"
-    if "круглосуточно" in hours.get("text", "").lower():
-        return "gn"
-    return "bl"
+def geocode(address):
+    url = "https://geocode-maps.yandex.ru/1.x/"
+    params = {"apikey": API_KEY, "geocode": address, "format": "json"}
+    try:
+        response = requests.get(url, params=params)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        raise Exception(f"Ошибка геокодирования: {e}")
+
+
+def get_spn(points):
+    lons = [float(p.split(",")[0]) for p in points]
+    lats = [float(p.split(",")[1]) for p in points]
+    delta_lon = abs(max(lons) - min(lons)) * 1.2
+    delta_lat = abs(max(lats) - min(lats)) * 1.2
+    return f"{delta_lon},{delta_lat}"
+
+
+def get_pharmacy_color(pharmacy):
+    try:
+        hours = pharmacy["metaDataProperty"]["GeocoderMetaData"]["Hours"]["text"]
+        if "круглосуточно" in hours.lower():
+            return "pm2gnl"
+        return "pm2blm"
+    except KeyError:
+        return "pm2grm"
 
 
 def find_pharmacies(ll):
-    search_api = "https://search-maps.yandex.ru/v1/"
+    url = "https://geocode-maps.yandex.ru/1.x/"
     params = {
         "apikey": API_KEY,
+        "geocode": ll,
+        "format": "json",
+        "results": 50,
+        "kind": "house",
         "text": "аптека",
-        "ll": ll,
-        "type": "biz",
-        "lang": "ru_RU",
-        "results": 10,
     }
     try:
-        response = requests.get(search_api, params=params)
+        response = requests.get(url, params=params)
         response.raise_for_status()
-        return response.json().get("features", [])
+        data = response.json()
+        features = data["response"]["GeoObjectCollection"]["featureMember"]
+        if not features:
+            return []
+
+        orig_lon, orig_lat = map(float, ll.split(","))
+        pharmacies = []
+
+        for feature in features:
+            geo_obj = feature["GeoObject"]
+            pos = geo_obj["Point"]["pos"]
+            lon, lat = map(float, pos.split())
+            dist = haversine(orig_lon, orig_lat, lon, lat)
+            pharmacies.append((dist, geo_obj))
+
+        pharmacies.sort(key=lambda x: x[0])
+        return [pharmacy[1] for pharmacy in pharmacies[:10]]
     except Exception as e:
         print(f"Ошибка поиска аптек: {e}")
         return []
 
 
 def show_map(ll, spn, points):
-    map_api = "https://static-maps.yandex.ru/1.x/"
+    url = "https://static-maps.yandex.ru/1.x/"
     params = {"ll": ll, "spn": spn, "l": "map", "pt": "~".join(points)}
     try:
-        response = requests.get(map_api, params=params)
+        response = requests.get(url, params=params)
         response.raise_for_status()
         with open("map.png", "wb") as f:
             f.write(response.content)
@@ -62,10 +94,7 @@ def show_map(ll, spn, points):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("address", nargs="+", help="Адрес для поиска")
-    args = parser.parse_args()
-    address = " ".join(args.address)
+    address = input("Введите адрес: ").strip()
 
     try:
         geo_data = geocode(address)
@@ -85,43 +114,34 @@ if __name__ == "__main__":
             sys.exit(1)
 
         points = [f"{orig_ll},pm2rdm"]
-        pharmacies_info = []
-        all_coords = [orig_ll]
+        pharmacy_data = []
+        all_points = [orig_ll]
 
-        for pharma in pharmacies:
-            coords = pharma["geometry"]["coordinates"]
-            pharma_ll = f"{coords[0]},{coords[1]}"
-            all_coords.append(pharma_ll)
+        for pharmacy in pharmacies:
+            pos = pharmacy["Point"]["pos"].replace(" ", ",")
+            all_points.append(pos)
+            color = get_pharmacy_color(pharmacy)
+            points.append(f"{pos},{color}")
 
-            meta = pharma["properties"]["CompanyMetaData"]
-            hours = meta.get("Hours", {})
-            color = get_point_color(hours)
+            lon, lat = map(float, pos.split(","))
+            distance = round(haversine(orig_lon, orig_lat, lon, lat))
+            name = pharmacy.get("name", "Название отсутствует")
+            addr = pharmacy.get("description", "Адрес отсутствует")
+            pharmacy_data.append((name, addr, distance))
 
-            points.append(f"{pharma_ll},pm2{color}m")
-            distance = round(haversine(orig_lon, orig_lat, coords[0], coords[1]))
-
-            pharmacies_info.append(
-                {
-                    "name": meta.get("name", "Без названия"),
-                    "address": meta.get("address", "Адрес не указан"),
-                    "hours": hours.get("text", "Нет данных"),
-                    "distance": distance,
-                }
-            )
-
-        lons = [float(c.split(",")[0]) for c in all_coords]
-        lats = [float(c.split(",")[1]) for c in all_coords]
+        lons = [float(p.split(",")[0]) for p in all_points]
+        lats = [float(p.split(",")[1]) for p in all_points]
         center_lon = (max(lons) + min(lons)) / 2
         center_lat = (max(lats) + min(lats)) / 2
+        spn = get_spn(all_points)
 
-        show_map(f"{center_lon},{center_lat}", get_spn(all_coords), points)
+        show_map(f"{center_lon},{center_lat}", spn, points)
 
-        print(f"\nНайдено аптек: {len(pharmacies_info)}\n")
-        for i, pharma in enumerate(pharmacies_info, 1):
-            print(f"{i}. {pharma['name']}")
-            print(f"   Адрес: {pharma['address']}")
-            print(f"   Режим работы: {pharma['hours']}")
-            print(f"   Расстояние: {pharma['distance']} м\n")
+        print("\nНайденные аптеки:")
+        for i, (name, addr, dist) in enumerate(pharmacy_data, 1):
+            print(f"{i}. {name}")
+            print(f"   Адрес: {addr}")
+            print(f"   Расстояние: {dist} метров\n")
 
     except Exception as e:
-        print(f"Ошибка: {e}")
+        print(f"Произошла ошибка: {e}")

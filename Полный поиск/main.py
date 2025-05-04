@@ -1,7 +1,8 @@
 import requests
 from map_params import get_spn
 
-api_key = "KEY" 
+api_key = "af8378fd-9ded-4076-99e2-636abd678ba7"
+
 
 def geocode(address):
     geocoder_api = "http://geocode-maps.yandex.ru/1.x/"
